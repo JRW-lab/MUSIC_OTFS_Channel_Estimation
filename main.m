@@ -20,7 +20,7 @@ parameters = struct(...
     'receiver_name', "CMC-MMSE",... 
     'max_timing_offset', 0.0,...
     'M_ary', 4, ...
-    'EbN0', 100, ...
+    'EbN0', 10, ...
     'M', 8, ...
     'N', 3, ...
     'T', 1 / 15000, ...
@@ -184,12 +184,6 @@ t_RXfull_vec = zeros(new_frames,1);
 error_diff = zeros(new_frames,2);
 for frame = 1:new_frames
 
-    % Generate data
-    [TX_1,TX_2,x_DD] = gen_data(bit_order,S,syms_per_f);
-    TX_bit = Gamma_MN' * TX_1;
-    TX_sym = Gamma_MN' * TX_2;
-    x_tilde = Gamma_MN' * x_DD;
-
     % Generate channel
     t_offset = max_timing_offset * Ts;
     [chn_g,chn_tau,chn_v] = channel_generation(Fc,vel);
@@ -215,15 +209,13 @@ for frame = 1:new_frames
         % Create H Matrix
         H = gen_H_direct(T,N,M,Lp,Ln,chn_g,chn_v,ambig_vals,tap_t_range,tap_f_range,t_offset);
     end
-    % H_tilde = gen_H_tilde(H,M,N,Lp,Ln,F_N);
 
     % %% MUSIC PART
     % Settings
-    noiseless = false;
+    noiseless = true;
     frame_samps = 1;
     sample_start = 1;
     sample_rate = 1;
-    eig_thresh = 3e-14;
     v_res = 0.01;
 
     % Unwrap matrix to use all NM possible elements per diagonal
@@ -235,18 +227,14 @@ for frame = 1:new_frames
     H_unwrapped = [H_left H_center H_right];
 
     % Sample main diagonal and take every Nth sample
-    % size_samp = min(N*M+Ln+1,N*M-Lp+1);
     size_samp = N*M;
-    x = zeros(ceil(size_samp / sample_rate),Lp-Ln-1);
-    count = 0;
+    x = zeros(floor(size_samp / sample_rate),Lp-Ln-1);
     x_cell = cell(frame_samps,1);
     for j = 1:frame_samps
         if ~noiseless
             z_tilde = sqrt(N0/2) * R_half * (randn(syms_per_f,1) + 1j*randn(syms_per_f,1));
         end
         for i = 2:Lp-Ln
-            count = count + 1;
-
             if noiseless
                 h_diag = diag(H_unwrapped,i-1);
             else
@@ -257,25 +245,35 @@ for frame = 1:new_frames
         end
         x_cell{j} = x;
     end
-    x = vertcat(x_cell{:});
+    X = vertcat(x_cell{:});
 
     % Generate covariance and select noise subspace
-    R_x = x * x';
+    R_x = X * X' / size(X,2);
     [U,D] = eig(R_x);
-
-    % Estimate number of paths
-    if noiseless
-        p_est = max(rank(D),sum(D > eig_thresh,"all"));
-    else
-        p_est = rank(D) - 1;
-    end
-
-    % Perform eigenvalue decomposition to find noise space
-    eig_vals = diag(D);
-    [~, ind] = sort(eig_vals, 'descend');
+    [~, ind] = sort(diag(D), 'descend');
     Us = U(:,ind);
-    Ds = D(ind,ind);
-    U_N = Us(:,(p_est+1):end);
+
+    % Estimate number of paths - Minimum Descriptive Length method (UNFINISHED)
+    % p = size(D,1);
+    % N_x = size(X,2);
+    % MDL = zeros(p,1);
+    % eigvals = abs(diag(D));
+    % for k = 1:p
+    %     % Find products for numerator and denominator
+    %     prod_num = 0;
+    %     prod_den = 0;
+    %     for i = k+1:p
+    %         prod_num = prod_num + eigvals(i)^(1/(p-k));
+    %         prod_den = prod_den + eigvals(i);
+    %     end
+    %     prod_den = prod_den / (p-k);
+    % 
+    %     % Find MDL(k) metric
+    %     MDL(k) = -(p-k)*N_x*log(prod_num/prod_den) + 0.5*k*(2*p-k)*log(N);
+    % end
+    % [~,p_est] = min(abs(MDL));
+    p_est = length(chn_v);
+    Un = Us(:,(p_est+1):end);
 
     % Sweep through all possible Doppler values and generate costs
     v_max = 100 * ceil((vel * (1000/3600)*Fc) / physconst('LightSpeed') / 100);
@@ -284,115 +282,36 @@ for frame = 1:new_frames
     power_vec = repmat(power_vec,frame_samps,1);
     e_temp = exp(1j*2*pi*Ts) .^ power_vec;
     e = e_temp.^v_range;
-    e = num2cell(e,1);
-    d_sqrd = cellfun(@(a) norm(U_N' * a)^2,e);
+    norm_mat = Un' * e;
+    d_sqrd = sum(abs(norm_mat).^2,1);
     P_hat = 1 ./ d_sqrd;
 
-    % Estimate doppler shifts
-    [~,v_idx] = findpeaks(P_hat);
-    if length(v_idx) ~= p_est
-        % figure(1)
-        % % Plot cost function (-P_hat)
-        % plot(v_range,-P_hat)
-        % xlabel("Estimated Doppler")
-        % ylabel("Cost function")
+    % % Plot cost function (-P_hat)
+    % figure(1)
+    % semilogy(v_range,-P_hat)
+    % xlabel("Estimated Doppler")
+    % ylabel("Cost function")
+    % 
+    % 1;
 
-        [~,v_idx] = maxk(P_hat,p_est);
-    end
-    if length(v_idx) ~= length(chn_v)
-        v_idx = v_idx * ones(1,length(chn_v));
-    end
-    v_est = v_range(v_idx);
+    % Estimate doppler shifts
+    [~,idx] = findpeaks(real(Pmu),'NPeaks',p_est,'SortStr','descend');
+    v_est = sort(v_grid(idx));
 
     % Estimate first Doppler value
     v_est_sorted = sort(v_est);
     chn_v_sorted = sort(chn_v);
+    fprintf("Frame %d/%d:\n",frame,new_frames)
     for i = 1:length(chn_v)
-        try
-            fprintf("(Frame %d/%d) Estimated v_%d = %f, true v_%d = %f\n",frame,new_frames,i-1,v_est_sorted(i),i-1,chn_v_sorted(i));
-        catch
-            1;
-        end
+        fprintf("    Estimated v_%d = %f, true v_%d = %f\n",i-1,v_est_sorted(i),i-1,chn_v_sorted(i));
     end
-    % R_x_reconst = U * D * U';
 
+    % Add error difference per ray to stack
     error_diff(frame,:) = abs(v_est_sorted - chn_v_sorted);
-
-    % % if nnz(error_diff(frame,:) > 100) > 0
-    % if 1
-    %     figure(1)
-    %     % Plot cost function (-P_hat)
-    %     plot(v_range,-P_hat)
-    %     xlabel("Estimated Doppler")
-    %     ylabel("Cost function")
-    % 
-    %     1;
-    % end
-
-    % if nnz(error_diff(frame,:) > 2) > 0
-    %     figure(1)
-    %     % Plot cost function (-P_hat)
-    %     plot(v_range,-P_hat)
-    %     xlabel("Estimated Doppler")
-    %     ylabel("Cost function")
-    % 
-    %     1;
-    % end
-
-    % %% Code for simulating OTFS system
-    % 
-    % % Generate noise
-    % z_tilde = sqrt(N0/2) * R_half * (randn(syms_per_f,1) + 1j*randn(syms_per_f,1));
-    % 
-    % % Create receive vector
-    % y_tilde = H_tilde * x_tilde + z_tilde;
-    % 
-    % % Iterative Detector - JRW
-    % switch receiver_name
-    %     case "CMC-MMSE"
-    %         [x_hat,iters_vec(frame),t_RXiter_vec(frame),t_RXfull_vec(frame)] = equalizer_CMC_MMSE(y_tilde,H_tilde,N,M,Lp,Ln,Es,N0,S,N_iters,R);
-    %     case "MMSE"
-    %         [x_hat,iters_vec(frame),t_RXiter_vec(frame),t_RXfull_vec(frame)] = equalizer_MMSE(y_tilde,H_tilde,Es,N0);
-    %     otherwise
-    %         error("Unsupported receiver for the simulated system!")
-    % end
-    % 
-    % % Hard detection for final x_hat
-    % dist = abs(x_hat.' - S).^2;
-    % [~,min_index] = min(dist);
-    % RX_sym = min_index.' - 1;
-    % 
-    % % Convert final RX_sym to RX_bit
-    % RX_bit = bit_order(RX_sym+1,:);
-    % 
-    % % Error calculation
-    % bit_error_vec = TX_bit ~= RX_bit;
-    % sym_error_vec = TX_sym ~= RX_sym;
-    % bit_errors(frame) = sum(bit_error_vec,"all");
-    % sym_errors(frame) = sum(sym_error_vec,"all");
-    % if sum(bit_error_vec,"all") > 0
-    %     frm_errors(frame) = 1;
-    % else
-    %     frm_errors(frame) = 0;
-    % end
 
 end
 
-% % Get parameters for throughput
-% frame_duration = N * T;
-% bandwidth_hz = M / T;
-% 
-% % Calculate BER, SER and FER
-% metrics.BER = sum(bit_errors,"all") / (new_frames*syms_per_f*log2(M_ary));
-% metrics.SER = sum(sym_errors,"all") / (new_frames*syms_per_f);
-% metrics.FER = sum(frm_errors,"all") / (new_frames);
-% metrics.Thr = (log2(M_ary) * syms_per_f * (1 - metrics.FER)) / (frame_duration * bandwidth_hz);
-% metrics.RX_iters = mean(iters_vec);
-% metrics.t_RXiter = mean(t_RXiter_vec);
-% metrics.t_RXfull = mean(t_RXfull_vec);
-
-%
-
+% Print error results
 fprintf("Mean abs error per path: ")
 for i = 1:size(error_diff,2)
     fprintf("%f", mean(error_diff(:,i)))
@@ -421,6 +340,7 @@ for i = 1:size(error_diff,2)
     end
 end
 
+% Plot error histogram per ray
 figure(10)
 for i = 1:size(error_diff,2)
     subplot(size(error_diff,2),1,i)

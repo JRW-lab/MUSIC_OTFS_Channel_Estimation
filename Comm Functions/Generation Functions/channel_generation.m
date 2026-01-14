@@ -15,11 +15,11 @@ function [chan_coef, delays, Dopplers] = channel_generation(car_fre, max_speed)
 
 % EVA delay profile
 % excess tap delay
-% delays = [0 30 150 310 370 710 1090 1730 2510]*10^(-9);     % in sec
-delays = [0 30]*10^(-9);     % in sec
+delays = [0 30 150 310 370 710 1090 1730 2510]*10^(-9);     % in sec
+% delays = [0 30]*10^(-9);     % in sec
 % relative power
-% pdp = [0 -1.5 -1.4 -3.6 -0.6 -9.1 -7.0 -12.0 -16.9];        % in dB 
-pdp = [0 -1.5];        % in dB 
+pdp = [0 -1.5 -1.4 -3.6 -0.6 -9.1 -7.0 -12.0 -16.9];        % in dB 
+% pdp = [0 -1.5];        % in dB 
 
 pow_prof = 10.^(pdp/10);                                    % dB to watt
 pow_prof = pow_prof/sum(pow_prof);                          % normalization                        
