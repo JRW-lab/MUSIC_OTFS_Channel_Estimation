@@ -13,16 +13,16 @@ addpath(fullfile(pwd, 'Comm Functions/OTFS-DD Functions'));
 addpath(fullfile(pwd, 'Comm Functions/TX RX Functions'));
 
 % Set parameters and number of frames
-new_frames = 1000;
+new_frames = 1;
 parameters = struct(...
     'system_name', "OTFS",...
     'CP', true,...
     'receiver_name', "CMC-MMSE",... 
     'max_timing_offset', 0.0,...
     'M_ary', 4, ...
-    'EbN0', 10, ...
+    'EbN0', 100, ...
     'M', 8, ...
-    'N', 3, ...
+    'N', 16, ...
     'T', 1 / 15000, ...
     'Fc', 4e9, ...
     'vel', 120, ...
@@ -181,7 +181,7 @@ t_RXiter_vec = zeros(new_frames,1);
 t_RXfull_vec = zeros(new_frames,1);
 
 % Simulation loop
-error_diff = zeros(new_frames,2);
+% error_diff = zeros(new_frames,2);
 for frame = 1:new_frames
 
     % Generate channel
@@ -212,40 +212,129 @@ for frame = 1:new_frames
 
     % %% MUSIC PART
     % Settings
-    noiseless = true;
-    frame_samps = 1;
-    sample_start = 1;
-    sample_rate = 1;
+    noiseless = false;
+    frame_samps = 10;
+    sample_start = 4;
+    sample_rate = 9;
     v_res = 0.01;
 
-    % Unwrap matrix to use all NM possible elements per diagonal
-    H_left = [H(1:Lp,N*M-Lp+1:N*M); zeros(N*M-Lp,Lp)];
-    H_right = [zeros(N*M+Ln,-Ln); H(N*M+Ln+1:N*M,1:-Ln)];
-    H_center = H;
-    H_center(1:Lp,N*M-Lp+1:N*M) = 0;
-    H_center(N*M+Ln+1:N*M,1:-Ln) = 0;
-    H_unwrapped = [H_left H_center H_right];
+    % % Unwrap matrix to use all NM possible elements per diagonal
+    % H_left = [H(1:Lp,N*M-Lp+1:N*M); zeros(N*M-Lp,Lp)];
+    % H_right = [zeros(N*M+Ln,-Ln); H(N*M+Ln+1:N*M,1:-Ln)];
+    % H_center = H;
+    % H_center(1:Lp,N*M-Lp+1:N*M) = 0;
+    % H_center(N*M+Ln+1:N*M,1:-Ln) = 0;
+    % H_unwrapped = [H_left H_center H_right];
 
-    % Sample main diagonal and take every Nth sample
-    size_samp = N*M;
-    x = zeros(floor(size_samp / sample_rate),Lp-Ln-1);
+    % Sample diagonals and take every Nth sample
+    H_shift = circshift(H,-Ln);
+    size_samp = N*M-Lp+Ln;
+    L = Lp - Ln + 1;
     x_cell = cell(frame_samps,1);
     for j = 1:frame_samps
+
+        % Generate noise if specified
         if ~noiseless
             z_tilde = sqrt(N0/2) * R_half * (randn(syms_per_f,1) + 1j*randn(syms_per_f,1));
         end
-        for i = 2:Lp-Ln
+
+        % Collect all diagonals
+        x = zeros(length(sample_start:sample_rate:size_samp),L);
+        for l = 1:L
             if noiseless
-                h_diag = diag(H_unwrapped,i-1);
+                h_diag = diag(H_shift,-l+1);
             else
-                h_diag = diag(H_unwrapped + z_tilde,i-1);
+                h_diag = diag(H_shift + z_tilde,-l+1);
             end
             x_samp = h_diag(sample_start:sample_rate:size_samp);
-            x(:,i-1) = x_samp;
+            x(:,l) = x_samp;
         end
-        x_cell{j} = x;
+
+        % Only save diagonals with a square norm above zero
+        sig_diags = sum(abs(x).^2,1) > 1e-15;
+        x_cell{j} = x(:,sig_diags);
     end
-    X = vertcat(x_cell{:});
+    X = horzcat(x_cell{:});
+
+    % x_cell = cell(Lp,1);
+    % for l = 0:Lp-1
+    %      diag_samp = diag(H,-l);
+    %      x_cell{l+1} = diag_samp(sample_start:sample_rate:end);
+    % end
+    % lengths = cellfun(@(x) length(x), x_cell);
+    % min_len = min(lengths);
+    % x_cell_trunc = cellfun(@(x) x(1:min_len), x_cell, "UniformOutput",false);
+    % X = horzcat(x_cell_trunc{:});
+    % 
+    % 1;
+
+
+    % 
+    % v_est_cell = cell(Lp,1);
+    % for l = 0:Lp-1
+    % 
+    %     % Collect current diagonal
+    %     X = diag(H,-l);
+    %     X = repmat(X,1,size(X,1)+1);
+    %     z = sqrt(N0/2) * R_half * (randn(syms_per_f,size(X,2)) + 1j*randn(syms_per_f,size(X,2)));
+    %     X = X + z(1:size(X,1),:);
+    %     size_samp = size(X,1);
+    % 
+    %     % Generate covariance and select noise subspace
+    %     R_x = X * X' / size(X,2);
+    %     [U,D] = eig(R_x);
+    %     [~, ind] = sort(diag(D), 'descend');
+    %     Us = U(:,ind);
+    % 
+    %     % Estimate number of paths - Minimum Descriptive Length method (UNFINISHED)
+    %     p = size(D,1);
+    %     N_x = size(X,2);
+    %     MDL = zeros(p,1);
+    %     eigvals = abs(diag(D));
+    %     for k = 1:p
+    %         % Find products for numerator and denominator
+    %         prod_num = 0;
+    %         prod_den = 0;
+    %         for i = k+1:p
+    %             prod_num = prod_num + eigvals(i)^(1/(p-k));
+    %             prod_den = prod_den + eigvals(i);
+    %         end
+    %         prod_den = prod_den / (p-k);
+    % 
+    %         % Find MDL(k) metric
+    %         MDL(k) = -(p-k)*N_x*log(prod_num/prod_den) + 0.5*k*(2*p-k)*log(N);
+    %     end
+    %     [~,p_est] = min(abs(MDL));
+    %     Un = Us(:,(p_est+1):end);
+    % 
+    %     % Sweep through all possible Doppler values and generate costs
+    %     v_range = -v_max:v_res:v_max;
+    %     power_vec = ((sample_start-1):sample_rate:(size_samp-1))';
+    %     power_vec = repmat(power_vec,frame_samps,1);
+    %     e_temp = exp(-1j*2*pi*Ts) .^ power_vec;
+    %     e = e_temp.^v_range;
+    %     norm_mat = Un' * e;
+    %     d_sqrd = sum(abs(norm_mat).^2,1);
+    %     P_hat = 1 ./ d_sqrd;
+    % 
+    %     % Estimate doppler shifts
+    %     [~,idx] = findpeaks(real(P_hat),'NPeaks',p_est,'SortStr','descend');
+    %     v_est_cell{l+1} = sort(v_range(idx));
+    % 
+    % 
+    %     1;
+    % end
+
+    % % Find sample covariance via spatial smoothing
+    % L_sbarray = l;
+    % J = size(X,1) - L_sbarray + 1;
+    % Rp = zeros(L_sbarray,L_sbarray,J);
+    % for p = 1:J
+    %     X_samp = X(p:p+L_sbarray-1,:);
+    %     Rp(:,:,p) = X_samp * X_samp' / size(X,2);
+    % 
+    % end
+    % R_x = sum(Rp,3) / J;
 
     % Generate covariance and select noise subspace
     R_x = X * X' / size(X,2);
@@ -279,71 +368,71 @@ for frame = 1:new_frames
     v_max = 100 * ceil((vel * (1000/3600)*Fc) / physconst('LightSpeed') / 100);
     v_range = -v_max:v_res:v_max;
     power_vec = ((sample_start-1):sample_rate:(size_samp-1))';
-    power_vec = repmat(power_vec,frame_samps,1);
+    % power_vec = repmat(power_vec,frame_samps,1);
     e_temp = exp(1j*2*pi*Ts) .^ power_vec;
     e = e_temp.^v_range;
     norm_mat = Un' * e;
     d_sqrd = sum(abs(norm_mat).^2,1);
     P_hat = 1 ./ d_sqrd;
 
-    % % Plot cost function (-P_hat)
-    % figure(1)
-    % semilogy(v_range,-P_hat)
-    % xlabel("Estimated Doppler")
-    % ylabel("Cost function")
-    % 
-    % 1;
+    % Plot cost function (-P_hat)
+    figure(1)
+    semilogy(v_range,-P_hat)
+    xlabel("Estimated Doppler")
+    ylabel("Cost function")
+
+    1;
 
     % Estimate doppler shifts
-    [~,idx] = findpeaks(real(Pmu),'NPeaks',p_est,'SortStr','descend');
-    v_est = sort(v_grid(idx));
+    [~,idx] = findpeaks(real(P_hat),'NPeaks',p_est,'SortStr','descend');
+    v_est = sort(v_range(idx));
 
     % Estimate first Doppler value
-    v_est_sorted = sort(v_est);
-    chn_v_sorted = sort(chn_v);
+    v_est_sorted = sort(v_est).';
+    chn_v_sorted = sort(chn_v).';
     fprintf("Frame %d/%d:\n",frame,new_frames)
     for i = 1:length(chn_v)
         fprintf("    Estimated v_%d = %f, true v_%d = %f\n",i-1,v_est_sorted(i),i-1,chn_v_sorted(i));
     end
 
-    % Add error difference per ray to stack
-    error_diff(frame,:) = abs(v_est_sorted - chn_v_sorted);
+    % % Add error difference per ray to stack
+    % error_diff(frame,:) = abs(v_est_sorted - chn_v_sorted).';
 
 end
 
-% Print error results
-fprintf("Mean abs error per path: ")
-for i = 1:size(error_diff,2)
-    fprintf("%f", mean(error_diff(:,i)))
-    if i ~= size(error_diff,2)
-        fprintf(", ")
-    else
-        fprintf("\n")
-    end
-end
-fprintf("Mode abs error per path: ")
-for i = 1:size(error_diff,2)
-    fprintf("%f", mode(error_diff(:,i)))
-    if i ~= size(error_diff,2)
-        fprintf(", ")
-    else
-        fprintf("\n")
-    end
-end
-fprintf("Max abs error per path: ")
-for i = 1:size(error_diff,2)
-    fprintf("%f", max(error_diff(:,i)))
-    if i ~= size(error_diff,2)
-        fprintf(", ")
-    else
-        fprintf("\n")
-    end
-end
-
-% Plot error histogram per ray
-figure(10)
-for i = 1:size(error_diff,2)
-    subplot(size(error_diff,2),1,i)
-    histogram(error_diff(:,i))
-    title(sprintf("Error distribution for ray %d",i))
-end
+% % Print error results
+% fprintf("Mean abs error per path: ")
+% for i = 1:size(error_diff,2)
+%     fprintf("%f", mean(error_diff(:,i)))
+%     if i ~= size(error_diff,2)
+%         fprintf(", ")
+%     else
+%         fprintf("\n")
+%     end
+% end
+% fprintf("Mode abs error per path: ")
+% for i = 1:size(error_diff,2)
+%     fprintf("%f", mode(error_diff(:,i)))
+%     if i ~= size(error_diff,2)
+%         fprintf(", ")
+%     else
+%         fprintf("\n")
+%     end
+% end
+% fprintf("Max abs error per path: ")
+% for i = 1:size(error_diff,2)
+%     fprintf("%f", max(error_diff(:,i)))
+%     if i ~= size(error_diff,2)
+%         fprintf(", ")
+%     else
+%         fprintf("\n")
+%     end
+% end
+% 
+% % Plot error histogram per ray
+% figure(10)
+% for i = 1:size(error_diff,2)
+%     subplot(size(error_diff,2),1,i)
+%     histogram(error_diff(:,i))
+%     title(sprintf("Error distribution for ray %d",i))
+% end

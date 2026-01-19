@@ -19,22 +19,24 @@ F_M = gen_DFT(M);
 Gamma_MN = gen_Gamma_MN(M,N);
 
 % Generate all possible noise taps
-R_taps = zeros(2*N-1,2*M-1);
+% R_taps = zeros(2*N-1,2*M-1);
+% N_indices = -N+1:N-1;
+% M_indices = -M+1:M-1;
+% for n = 1:length(N_indices)
+%     for m = 1:length(M_indices)
+%         R_taps(n,m) = ambig_direct((N_indices(n))*Ts,(M_indices(m))/Ts,Ts,shape,alpha,q,res_discretization);
+%     end
+% end
 N_indices = -N+1:N-1;
 M_indices = -M+1:M-1;
-for n = 1:length(N_indices)
-    for m = 1:length(M_indices)
-        R_taps(n,m) = ambig_direct((N_indices(n))*Ts,(M_indices(m))/Ts,Ts,shape,alpha,q,res_discretization);
-    end
-end
+[NN, MM] = ndgrid(N_indices, M_indices);
+R_taps = arrayfun(@(n,m) ...
+    ambig_direct(n*Ts, m/Ts, Ts, shape, alpha, q, res_discretization), ...
+    NN, MM);
+
 
 % Assign correct noise taps to covariance matrix
 R_ztf = zeros(N*M);
-% fprintf("| Progress:")
-% for i = 1:M-12
-%     fprintf(" ");
-% end
-% fprintf("|\n");
 for m1 = 0:M-1
     for m2 = 0:M-1
         for n1 = 0:N-1
@@ -47,8 +49,27 @@ for m1 = 0:M-1
             end
         end
     end
-    % fprintf("x")
 end
+
+% Create index grids
+[m1, n1, m2, n2] = ndgrid(0:M-1, 0:N-1, 0:M-1, 0:N-1);
+
+n_num = n1 - n2;     % N-difference
+m_num = m2 - m1;     % M-difference
+
+% Map differences to indices
+n_map = n_num + N;   % since N_indices = -(N-1):(N-1)
+m_map = m_num + M;
+
+% Linear indices into R_taps
+idx = sub2ind(size(R_taps), n_map, m_map);
+
+% Assign covariance matrix
+R_ztf2 = reshape(R_taps(idx), N*M, N*M);
+
+
+norm(R_ztf2 - R_ztf, 'fro')
+
 
 % Convert covariance matrix into needed domain
 R_zdd = kron(F_N',F_M)' * R_ztf * kron(F_N',F_M);
