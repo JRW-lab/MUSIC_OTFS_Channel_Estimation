@@ -51,26 +51,6 @@ for m1 = 0:M-1
     end
 end
 
-% Create index grids
-[m1, n1, m2, n2] = ndgrid(0:M-1, 0:N-1, 0:M-1, 0:N-1);
-
-n_num = n1 - n2;     % N-difference
-m_num = m2 - m1;     % M-difference
-
-% Map differences to indices
-n_map = n_num + N;   % since N_indices = -(N-1):(N-1)
-m_map = m_num + M;
-
-% Linear indices into R_taps
-idx = sub2ind(size(R_taps), n_map, m_map);
-
-% Assign covariance matrix
-R_ztf2 = reshape(R_taps(idx), N*M, N*M);
-
-
-norm(R_ztf2 - R_ztf, 'fro')
-
-
 % Convert covariance matrix into needed domain
 R_zdd = kron(F_N',F_M)' * R_ztf * kron(F_N',F_M);
 R_zdd_tilde = Gamma_MN' * R_zdd * Gamma_MN;

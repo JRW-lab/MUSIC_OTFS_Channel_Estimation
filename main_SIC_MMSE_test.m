@@ -1,4 +1,31 @@
-function metrics = sim_fun_OTFS_DD_v3(new_frames,parameters)
+clc; clear;
+
+% Set paths and data
+addpath(fullfile(pwd, 'Comm Functions'));
+addpath(fullfile(pwd, 'Comm Functions/Custom Functions'));
+addpath(fullfile(pwd, 'Comm Functions/Generation Functions'));
+addpath(fullfile(pwd, 'Comm Functions/OTFS-DD Functions'));
+addpath(fullfile(pwd, 'Comm Functions/TX RX Functions'));
+
+% SIC-MMSE Settings
+
+% Set system parameters and number of frames
+new_frames = 1;
+parameters = struct(...
+    'system_name', "OTFS",...
+    'CP', true,...
+    'receiver_name', "CMC-MMSE",... 
+    'max_timing_offset', 0.0,...
+    'M_ary', 4, ...
+    'EbN0', 100, ...
+    'M', 32, ...
+    'N', 32, ...
+    'T', 1 / 15000, ...
+    'Fc', 4e9, ...
+    'vel', 120, ...
+    'shape', "rrc", ...
+    'alpha', 0.4, ...
+    'Q', 2);
 
 % Make parameters
 fields = fieldnames(parameters);
@@ -31,7 +58,7 @@ ambig_res = 101;
 
 % Inputs from system object
 Es = sys.Es;
-S = sys.S;
+S_alphabet = sys.S;
 M_ary = sys.M_ary;
 N0 = sys.N0;
 M = sys.M_sbcars;
@@ -56,6 +83,9 @@ if shape == "rect" || shape == "ideal"
 elseif shape == "sinc"
     alpha = 1;
 end
+
+% Make total channel length after delay shifting
+L = Lp - Ln;
 
 load_test = sys.ambig_vals;
 if isempty(load_test)
@@ -130,6 +160,7 @@ end
 syms_per_f = M*N;
 Gamma_MN = gen_Gamma_MN(M,N);
 F_N = gen_DFT(N);
+F_M = gen_DFT(M);
 
 % Bring in previously loaded data
 ambig_t_range = sys.ambig_t_range;
@@ -154,10 +185,13 @@ t_RXfull_vec = zeros(new_frames,1);
 for frame = 1:new_frames
 
     % Generate data
-    [TX_1,TX_2,x_DD] = gen_data(bit_order,S,syms_per_f);
+    [TX_1,TX_2,x_DD] = gen_data(bit_order,S_alphabet,syms_per_f);
     TX_bit = Gamma_MN' * TX_1;
     TX_sym = Gamma_MN' * TX_2;
     x_tilde = Gamma_MN' * x_DD;
+    X_DD = reshape(x_DD,M,N);
+    S = X_DD * F_N';
+    s = S(:);
 
     % Generate channel
     t_offset = max_timing_offset * Ts;
@@ -184,18 +218,33 @@ for frame = 1:new_frames
         % Create H Matrix
         H = gen_H_direct(T,N,M,Lp,Ln,chn_g,chn_v,ambig_vals,tap_t_range,tap_f_range,t_offset);
     end
-    H_tilde = gen_H_tilde(H,M,N,Lp,Ln,F_N);
 
-    % Generate noise
+    % Makes all non-causal taps causal (easier for SIC-MMSE algorithm)
+    H = circshift(H,-Ln);
+
+    % Create DD-IO relationship
+    H_tilde = gen_H_tilde(H,M,N,L,0,F_N);
+    H_DD = Gamma_MN * H_tilde * Gamma_MN';
+
+    % Generate shuffled DD noise, convert to time domain
     z_tilde = sqrt(N0/2) * R_half * (randn(syms_per_f,1) + 1j*randn(syms_per_f,1));
+    z_DD = Gamma_MN * z_tilde;
+    Z_DD = reshape(z_DD,M,N);
+    Z_TF = F_M * Z_DD * F_N';
+    W = F_M' * Z_TF;
+    w = W(:);
 
-    % Create receive vector
+    % Create receive vectors (Shuffled DD, DD and time)
     y_tilde = H_tilde * x_tilde + z_tilde;
+    y_DD = H_DD * x_DD + z_DD;
+    nu = H * s + w;
 
     % Iterative Detector - JRW
     switch receiver_name
+        case "SIC-MMSE"
+            [x_hat,iters_vec(frame),t_RXiter_vec(frame),t_RXfull_vec(frame)] = equalizer_SIC_MMSE(y_DD,H_DD);
         case "CMC-MMSE"
-            [x_hat,iters_vec(frame),t_RXiter_vec(frame),t_RXfull_vec(frame)] = equalizer_CMC_MMSE(y_tilde,H_tilde,N,M,Lp,Ln,Es,N0,S,N_iters,R);
+            [x_hat,iters_vec(frame),t_RXiter_vec(frame),t_RXfull_vec(frame)] = equalizer_CMC_MMSE(y_tilde,H_tilde,N,M,Lp-Ln,0,Es,N0,S_alphabet,N_iters,R);
         case "MMSE"
             [x_hat,iters_vec(frame),t_RXiter_vec(frame),t_RXfull_vec(frame)] = equalizer_MMSE(y_tilde,H_tilde,Es,N0);
         otherwise
@@ -203,7 +252,7 @@ for frame = 1:new_frames
     end
 
     % Hard detection for final x_hat
-    dist = abs(x_hat.' - S).^2;
+    dist = abs(x_hat.' - S_alphabet).^2;
     [~,min_index] = min(dist);
     RX_sym = min_index.' - 1;
 
