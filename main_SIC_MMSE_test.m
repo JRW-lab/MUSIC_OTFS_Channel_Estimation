@@ -8,17 +8,18 @@ addpath(fullfile(pwd, 'Comm Functions/OTFS-DD Functions'));
 addpath(fullfile(pwd, 'Comm Functions/TX RX Functions'));
 
 % SIC-MMSE Settings
+zero_padding = true;
 
 % Set system parameters and number of frames
 new_frames = 1;
 parameters = struct(...
     'system_name', "OTFS",...
     'CP', true,...
-    'receiver_name', "CMC-MMSE",... 
+    'receiver_name', "SIC-MMSE",... 
     'max_timing_offset', 0.0,...
     'M_ary', 4, ...
     'EbN0', 100, ...
-    'M', 32, ...
+    'M', 64, ...
     'N', 32, ...
     'T', 1 / 15000, ...
     'Fc', 4e9, ...
@@ -186,6 +187,19 @@ for frame = 1:new_frames
 
     % Generate data
     [TX_1,TX_2,x_DD] = gen_data(bit_order,S_alphabet,syms_per_f);
+    if zero_padding
+        % Add zeros to end of each time symbol
+        change_map = zeros(M,N);
+        change_map((M-L+1):M,:) = 1;
+        change_map_vert = logical(change_map(:));
+
+        % Apply zeros over already-generated data
+        TX_1(change_map_vert,:) = -1;
+        TX_2(change_map_vert) = -1;
+        x_DD(change_map_vert) = 0;
+    else
+        change_map_vert = logical(zeros(M,N));
+    end
     TX_bit = Gamma_MN' * TX_1;
     TX_sym = Gamma_MN' * TX_2;
     x_tilde = Gamma_MN' * x_DD;
@@ -242,7 +256,7 @@ for frame = 1:new_frames
     % Iterative Detector - JRW
     switch receiver_name
         case "SIC-MMSE"
-            [x_hat,iters_vec(frame),t_RXiter_vec(frame),t_RXfull_vec(frame)] = equalizer_SIC_MMSE(y_DD,H_DD);
+            [x_hat,iters_vec(frame),t_RXiter_vec(frame),t_RXfull_vec(frame)] = equalizer_SIC_MMSE(nu,H,N,M,L,Es,N0,S_alphabet,N_iters);
         case "CMC-MMSE"
             [x_hat,iters_vec(frame),t_RXiter_vec(frame),t_RXfull_vec(frame)] = equalizer_CMC_MMSE(y_tilde,H_tilde,N,M,Lp-Ln,0,Es,N0,S_alphabet,N_iters,R);
         case "MMSE"
@@ -262,7 +276,7 @@ for frame = 1:new_frames
     % Error calculation
     bit_error_vec = TX_bit ~= RX_bit;
     sym_error_vec = TX_sym ~= RX_sym;
-    bit_errors(frame) = sum(bit_error_vec,"all");
+    bit_errors(frame) = sum(bit_error_vec(),"all");
     sym_errors(frame) = sum(sym_error_vec,"all");
     if sum(bit_error_vec,"all") > 0
         frm_errors(frame) = 1;
