@@ -175,8 +175,8 @@ if shape ~= "rect"
 end
 
 % Reset bit errors for each SNR
-bit_errors = zeros(new_frames,syms_per_f*log2(M_ary));
-sym_errors = zeros(new_frames,syms_per_f);
+bit_errors = zeros(new_frames,1);
+sym_errors = zeros(new_frames,1);
 frm_errors = zeros(new_frames,1);
 iters_vec = zeros(new_frames,1);
 t_RXiter_vec = zeros(new_frames,1);
@@ -186,22 +186,29 @@ t_RXfull_vec = zeros(new_frames,1);
 for frame = 1:new_frames
 
     % Generate data
-    [TX_1,TX_2,x_DD] = gen_data(bit_order,S_alphabet,syms_per_f);
+    [TX_bit,TX_sym,x_DD] = gen_data(bit_order,S_alphabet,syms_per_f);
     if zero_padding
+        % Count number of total zero padding needed
+        zero_syms = N*L;
+
         % Add zeros to end of each time symbol
         change_map = zeros(M,N);
         change_map((M-L+1):M,:) = 1;
         change_map_vert = logical(change_map(:));
 
         % Apply zeros over already-generated data
-        TX_1(change_map_vert,:) = -1;
-        TX_2(change_map_vert) = -1;
+        TX_bit(change_map_vert,:) = -1;
+        TX_sym(change_map_vert) = -1;
         x_DD(change_map_vert) = 0;
     else
-        change_map_vert = logical(zeros(M,N));
+        % Count number of total zero padding needed
+        zero_syms = 0;
+
+        % Create blank change map
+        change_map_vert = false(M,N);
     end
-    TX_bit = Gamma_MN' * TX_1;
-    TX_sym = Gamma_MN' * TX_2;
+    TX_bit_shuffled = Gamma_MN' * TX_bit;
+    TX_sym_shuffled = Gamma_MN' * TX_sym;
     x_tilde = Gamma_MN' * x_DD;
     X_DD = reshape(x_DD,M,N);
     S = X_DD * F_N';
@@ -273,9 +280,16 @@ for frame = 1:new_frames
     % Convert final RX_sym to RX_bit
     RX_bit = bit_order(RX_sym+1,:);
 
+    
+
     % Error calculation
-    bit_error_vec = TX_bit ~= RX_bit;
-    sym_error_vec = TX_sym ~= RX_sym;
+    if receiver_name == "SIC-MMSE"
+        bit_error_vec = TX_bit(~change_map_vert,:) ~= RX_bit(~change_map_vert,:);
+        sym_error_vec = TX_sym(~change_map_vert) ~= RX_sym(~change_map_vert);
+    else
+        bit_error_vec = TX_bit_shuffled(logical(Gamma_MN' * ~change_map_vert),:) ~= RX_bit(logical(Gamma_MN' * ~change_map_vert),:);
+        sym_error_vec = TX_sym_shuffled(logical(Gamma_MN' * ~change_map_vert)) ~= RX_sym(logical(Gamma_MN' * ~change_map_vert));
+    end
     bit_errors(frame) = sum(bit_error_vec(),"all");
     sym_errors(frame) = sum(sym_error_vec,"all");
     if sum(bit_error_vec,"all") > 0
@@ -291,10 +305,10 @@ frame_duration = N * T;
 bandwidth_hz = M / T;
 
 % Calculate BER, SER and FER
-metrics.BER = sum(bit_errors,"all") / (new_frames*syms_per_f*log2(M_ary));
-metrics.SER = sum(sym_errors,"all") / (new_frames*syms_per_f);
+metrics.BER = sum(bit_errors,"all") / (new_frames*(syms_per_f-zero_syms)*log2(M_ary));
+metrics.SER = sum(sym_errors,"all") / (new_frames*(syms_per_f-zero_syms));
 metrics.FER = sum(frm_errors,"all") / (new_frames);
-metrics.Thr = (log2(M_ary) * syms_per_f * (1 - metrics.FER)) / (frame_duration * bandwidth_hz);
+metrics.Thr = (log2(M_ary) * (syms_per_f-zero_syms) * (1 - metrics.FER)) / (frame_duration * bandwidth_hz);
 metrics.RX_iters = mean(iters_vec);
 metrics.t_RXiter = mean(t_RXiter_vec);
 metrics.t_RXfull = mean(t_RXfull_vec);

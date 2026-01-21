@@ -84,7 +84,8 @@ for i = 1:N_iters
 end
 
 % Export results
-x_hat = s_hat_last * F_N;
+X_hat = s_hat_last * F_N;
+x_hat = X_hat(:);
 
 % Stop runtime
 t_RXiter = mean(iter_runtimes);
