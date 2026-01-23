@@ -9,10 +9,11 @@ addpath(fullfile(pwd, 'Comm Functions/TX RX Functions'));
 
 % Settings
 num_frames = 10;
-sample_start = 4;
-sample_rate = 9;
+sample_start = 1;
+sample_rate = 6;
 v_res = 0.01;
-grouping_thresh = 5;
+grouping_thresh = 8;
+num_pilots_per_tsym = 2;
 
 % Set system parameters
 parameters = struct(...
@@ -21,9 +22,9 @@ parameters = struct(...
     'receiver_name', "CMC-MMSE",... 
     'max_timing_offset', 0.0,...
     'M_ary', 4, ...
-    'EbN0', 100, ...
+    'EbN0', 100000, ...
     'M', 32, ...
-    'N', 32, ...
+    'N', 16, ...
     'T', 1 / 15000, ...
     'Fc', 4e9, ...
     'vel', 120, ...
@@ -61,7 +62,7 @@ ambig_res = 101;
 
 % Inputs from system object
 Es = sys.Es;
-S = sys.S;
+S_alphabet = sys.S;
 M_ary = sys.M_ary;
 N0 = sys.N0;
 M = sys.M_sbcars;
@@ -78,14 +79,17 @@ alpha = sys.rolloff;
 q = sys.q;
 T = sys.T;
 Ts = sys.Ts;
-Lp = sys.Lp + 1;
-Ln = sys.Ln - 1;
+Lp = sys.Lp;
+Ln = sys.Ln;
 if shape == "rect" || shape == "ideal"
     q = 1;
     alpha = 1;
 elseif shape == "sinc"
     alpha = 1;
 end
+
+% Make total channel length after delay shifting
+L = Lp - Ln;
 
 load_test = sys.ambig_vals;
 if isempty(load_test)
@@ -160,6 +164,7 @@ end
 syms_per_f = M*N;
 Gamma_MN = gen_Gamma_MN(M,N);
 F_N = gen_DFT(N);
+F_M = gen_DFT(M);
 
 % Bring in previously loaded data
 ambig_t_range = sys.ambig_t_range;
@@ -184,8 +189,51 @@ t_RXfull_vec = zeros(num_frames,1);
 [~,chn_tau,chn_v] = channel_generation(Fc,vel);
 
 % Sample frames for each diagonal entry
-X_taps = zeros(length(sample_start:sample_rate:N*M),num_frames,Lp-Ln+1);
+X_taps = zeros(N*num_pilots_per_tsym,num_frames,Lp-Ln+1);
 for frame = 1:num_frames
+
+
+    % Generate data
+    [TX_bit,TX_sym,x_DD] = gen_data(bit_order,S_alphabet,syms_per_f);
+    % % x_DD = [repmat([1; zeros(L,1)],floor(N*M/(L+1)),1); zeros(N*M-(L+1)*floor(N*M/(L+1)),1)];
+    % % x_DD = zeros(N*M,1);
+    % % x_DD(1:2:end) = 1;
+    % if zero_padding
+        % Count number of total zero padding needed
+        zero_syms = N*L;
+
+        % Add zeros to end of each time symbol
+        change_map = zeros(M,N);
+        change_map((M-2*L):M,:) = 1;
+        % change_map_vert = logical(change_map(:));
+        change_map_vert = true(M,N); % For now, just remove all data
+
+        % Apply zeros over already-generated data
+        TX_bit(change_map_vert,:) = -1;
+        TX_sym(change_map_vert) = -1;
+        x_DD(change_map_vert) = 0;
+
+        % Insert pilot symbols L spacing apart per time symbol
+        pilot_rows = zeros(num_pilots_per_tsym,1);
+        for i = 1:num_pilots_per_tsym
+            pilot_rows(i) = M-i*L-i+1;
+        end
+        % pilot_rows = [M-L,M-2*L-1,M-3*L-2];
+        x_DD(pilot_rows,:) = sqrt(N);
+
+    % else
+    %     % Count number of total zero padding needed
+    %     zero_syms = 0;
+    % 
+    %     % Create blank change map
+    %     change_map_vert = false(M,N);
+    % end
+    TX_bit_shuffled = Gamma_MN' * TX_bit;
+    TX_sym_shuffled = Gamma_MN' * TX_sym;
+    x_tilde = Gamma_MN' * x_DD;
+    X_DD = reshape(x_DD,M,N);
+    S = X_DD * F_N';
+    s = S(:);
 
     % Generate channel
     t_offset = max_timing_offset * Ts;
@@ -213,27 +261,74 @@ for frame = 1:num_frames
         H = gen_H_direct(T,N,M,Lp,Ln,chn_g,chn_v,ambig_vals,tap_t_range,tap_f_range,t_offset);
     end
 
-    % Unwrap matrix to use all NM possible elements per diagonal
-    H_shift = circshift(H,-Ln); % Makes all non-causal taps causal
-    H_left = [zeros(Lp-Ln,N*M-(Lp-Ln)), H_shift(1:(Lp-Ln),N*M-(Lp-Ln)+1:N*M)];
-    H_center = H_shift;
-    H_center(1:(Lp-Ln),N*M-(Lp-Ln)+1:N*M) = 0;
-    H_unwrapped = [H_center; H_left];
+    % Makes all non-causal taps causal (easier for SIC-MMSE algorithm)
+    H = circshift(H,-Ln);
+
+    % Generate shuffled DD noise, convert to time domain
+    z_tilde = sqrt(N0/2) * R_half * (randn(syms_per_f,1) + 1j*randn(syms_per_f,1));
+    z_DD = Gamma_MN * z_tilde;
+    Z_DD = reshape(z_DD,M,N);
+    Z_TF = F_M * Z_DD * F_N';
+    W = F_M' * Z_TF;
+    w = W(:);
+
+    % Create receive vector
+    nu = H * s;
+
+    % Collect samples from diagonals
+    pilot_idx = zeros(N,num_pilots_per_tsym);
+    saved_taps = cell(N,num_pilots_per_tsym);
+    for n = 0:N-1
+
+        for i = 1:num_pilots_per_tsym
+            pilot_idx(n+1,i) = (M*(n+1)-L*i-i+1);
+            saved_taps{n+1,i} = nu(pilot_idx(n+1,i):pilot_idx(n+1,i)+L).';
+        end
+    end
+
+    % Combine information for all pilot multiples per time sym
+    pilot_idx_all = pilot_idx(:);
+    saved_taps_all = saved_taps(:);
+    saved_taps_mat = vertcat(saved_taps_all{:});
+
+    % Sort all taps since I acquired them in reverse
+    [~,sorted_idx] = sort(pilot_idx_all, 'ascend');
+    pilot_idx_sorted = pilot_idx_all(sorted_idx);
+    saved_taps_sorted = saved_taps_mat(sorted_idx,:);
 
     % Sample diagonals and take every Nth sample
     for l = 1:(Lp-Ln+1)
-        h_diag = diag(H_unwrapped,-l+1);
-        x_samp = h_diag(sample_start:sample_rate:N*M);
+        x_samp = saved_taps_sorted(:,l);
         X_taps(:,frame,l) = x_samp;
     end
+
+    % % Unwrap matrix to use all NM possible elements per diagonal
+    % H_left = [zeros(Lp-Ln,N*M-(Lp-Ln)), H_shift(1:(Lp-Ln),N*M-(Lp-Ln)+1:N*M)];
+    % H_center = H_shift;
+    % H_center(1:(Lp-Ln),N*M-(Lp-Ln)+1:N*M) = 0;
+    % H_unwrapped = [H_center; H_left];
+    % 
+    % % Sample diagonals and take every Nth sample
+    % for l = 1:(Lp-Ln+1)
+    %     h_diag = diag(H_unwrapped,-l+1);
+    %     x_samp = h_diag(sample_start:sample_rate:N*M);
+    %     X_taps(:,frame,l) = x_samp;
+    % end
 
 end
 
 % Set variables for MUSIC
 v_max = 100 * ceil((vel * (1000/3600)*Fc) / physconst('LightSpeed') / 100);
+v_range = -v_max:v_res:v_max;
+% power_vec = ((sample_start-1):sample_rate:(N*M-1))';
+power_vec = pilot_idx_sorted-1;
+e_temp = exp(1j*2*pi*Ts) .^ power_vec;
+e = e_temp.^v_range;
 
 % Solve MUSIC for each diagonal
+P_scores = cell(Lp-Ln+1,1);
 v_est = cell(Lp-Ln+1,1);
+s_est = cell(Lp-Ln+1,1);
 for tap_idx = 1:Lp-Ln+1
 
     % Select current x samples
@@ -250,7 +345,7 @@ for tap_idx = 1:Lp-Ln+1
     [~, ind] = sort(diag(D), 'descend');
     Us = U(:,ind);
 
-    % Estimate number of paths - Minimum Descriptive Length method (UNFINISHED)
+    % Estimate number of paths - Minimum Descriptive Length method
     p = size(D,1);
     N_x = size(X,2);
     MDL = zeros(p,1);
@@ -269,33 +364,46 @@ for tap_idx = 1:Lp-Ln+1
         MDL(k) = -(p-k)*N_x*log(prod_num/prod_den) + 0.5*k*(2*p-k)*log(N);
     end
     [~,p_est] = min(abs(MDL));
-    % p_est = length(chn_v);
     Un = Us(:,(p_est+1):end);
 
     % Sweep through all possible Doppler values and generate costs
-    v_range = -v_max:v_res:v_max;
-    power_vec = ((sample_start-1):sample_rate:(N*M-1))';
-    e_temp = exp(1j*2*pi*Ts) .^ power_vec;
-    e = e_temp.^v_range;
     norm_mat = Un' * e;
     d_sqrd = sum(abs(norm_mat).^2,1);
     P_hat = 1 ./ d_sqrd;
 
-    % % Plot cost function (-P_hat)
-    % figure(1)
-    % semilogy(v_range,-P_hat)
-    % xlabel("Estimated Doppler")
-    % ylabel("Cost function")
-    % 
-    % 1;
-
     % Estimate doppler shifts
-    [~,idx] = findpeaks(real(P_hat),'NPeaks',p_est,'SortStr','descend');
+    [P_scores{tap_idx},idx] = findpeaks(real(P_hat),'NPeaks',p_est,'SortStr','descend');
     v_est{tap_idx} = v_range(idx).';
 
-    1;
+    % "Re"create original Vandermonte matrix A (x = A * s), solve for s
+    A = e_temp.^v_range(idx);
+    s_est{tap_idx} = A \ X;
 
 end
+
+% A_tap_range = (0:(N*M-1)).';
+A_tap_range = (sample_start:sample_rate:(N*M-1)).';
+
+% 
+thresh = 1;
+v_est_true = [];
+for i = 1:length(v_est)
+    v_est_sel = v_est{i};
+
+    if isempty(v_est_true) || isempty(v_est_sel)
+        v_est_true = [v_est_true; v_est_sel];
+    else
+        dist = (v_est_true - v_est_sel.');
+        min_dist = min(abs(dist).^2,[],1);
+        new_locs = min_dist > thresh;
+
+        v_est_true = [v_est_true; v_est_sel(new_locs)];
+    end
+end
+v_est_sorted = sort(v_est_true);
+
+
+%%
 
 % Collect all estimated Dopplers
 v_est_all = vertcat(v_est{:});
@@ -304,9 +412,9 @@ v_est_all = sort(v_est_all);
 % Group by similarity and only take unique estimates
 groups = [true; abs(diff(v_est_all)) > grouping_thresh];
 v_est_sorted = v_est_all(groups);
+chn_v_sorted = sort(chn_v).';
+
 
 % Just print the values so we can see them for now
 v_est_sorted.'
-sort(chn_v)
-
-1;
+chn_v_sorted.'
