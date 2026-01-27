@@ -190,6 +190,7 @@ t_RXfull_vec = zeros(num_frames,1);
 
 % Sample frames for each diagonal entry
 X_taps = zeros(N*num_pilots_per_tsym,num_frames,Lp-Ln+1);
+H_cell = cell(num_frames,1);
 for frame = 1:num_frames
 
 
@@ -263,6 +264,7 @@ for frame = 1:num_frames
 
     % Makes all non-causal taps causal (easier for SIC-MMSE algorithm)
     H = circshift(H,-Ln);
+    H_cell{frame} = H;
 
     % Generate shuffled DD noise, convert to time domain
     z_tilde = sqrt(N0/2) * R_half * (randn(syms_per_f,1) + 1j*randn(syms_per_f,1));
@@ -302,25 +304,11 @@ for frame = 1:num_frames
         X_taps(:,frame,l) = x_samp;
     end
 
-    % % Unwrap matrix to use all NM possible elements per diagonal
-    % H_left = [zeros(Lp-Ln,N*M-(Lp-Ln)), H_shift(1:(Lp-Ln),N*M-(Lp-Ln)+1:N*M)];
-    % H_center = H_shift;
-    % H_center(1:(Lp-Ln),N*M-(Lp-Ln)+1:N*M) = 0;
-    % H_unwrapped = [H_center; H_left];
-    % 
-    % % Sample diagonals and take every Nth sample
-    % for l = 1:(Lp-Ln+1)
-    %     h_diag = diag(H_unwrapped,-l+1);
-    %     x_samp = h_diag(sample_start:sample_rate:N*M);
-    %     X_taps(:,frame,l) = x_samp;
-    % end
-
 end
 
 % Set variables for MUSIC
 v_max = 100 * ceil((vel * (1000/3600)*Fc) / physconst('LightSpeed') / 100);
 v_range = -v_max:v_res:v_max;
-% power_vec = ((sample_start-1):sample_rate:(N*M-1))';
 power_vec = pilot_idx_sorted-1;
 e_temp = exp(1j*2*pi*Ts) .^ power_vec;
 e = e_temp.^v_range;
@@ -329,10 +317,11 @@ e = e_temp.^v_range;
 P_scores = cell(Lp-Ln+1,1);
 v_est = cell(Lp-Ln+1,1);
 s_est = cell(Lp-Ln+1,1);
+X_taps = squeeze(num2cell(X_taps, [1 2]));
 for tap_idx = 1:Lp-Ln+1
 
     % Select current x samples
-    X = X_taps(:,:,tap_idx);
+    X = X_taps{tap_idx};
 
     % Skip this diagonal if it doesn't have sufficient information
     if norm(X) < 1e-15
@@ -372,7 +361,8 @@ for tap_idx = 1:Lp-Ln+1
     P_hat = 1 ./ d_sqrd;
 
     % Estimate doppler shifts
-    [P_scores{tap_idx},idx] = findpeaks(real(P_hat),'NPeaks',p_est,'SortStr','descend');
+    [scores,idx] = findpeaks(real(P_hat),'NPeaks',p_est,'SortStr','descend');
+    P_scores{tap_idx} = scores.';
     v_est{tap_idx} = v_range(idx).';
 
     % "Re"create original Vandermonte matrix A (x = A * s), solve for s
@@ -381,40 +371,52 @@ for tap_idx = 1:Lp-Ln+1
 
 end
 
-% A_tap_range = (0:(N*M-1)).';
-A_tap_range = (sample_start:sample_rate:(N*M-1)).';
+% Get combined set of Dopplers
+v_est_sorted = sort(unique(vertcat(v_est{:})));
 
-% 
-thresh = 1;
-v_est_true = [];
-for i = 1:length(v_est)
-    v_est_sel = v_est{i};
+% Recreate A from Doppler estimates to get s vectors
+A_est = e_temp.^(v_est_sorted.');
+s_est = cellfun(@(x) lsqminnorm(A_est,x), X_taps, 'UniformOutput', false);
 
-    if isempty(v_est_true) || isempty(v_est_sel)
-        v_est_true = [v_est_true; v_est_sel];
-    else
-        dist = (v_est_true - v_est_sel.');
-        min_dist = min(abs(dist).^2,[],1);
-        new_locs = min_dist > thresh;
+% Create A again to estimate all taps
+power_vec_ext = (-Lp:(N*M-1-Ln))';
+e_temp2 = exp(1j*2*pi*Ts) .^ power_vec_ext;
+A_ext = e_temp2.^(v_est_sorted.');
+X_est = cellfun(@(x) A_ext * x, s_est, 'UniformOutput', false);
 
-        v_est_true = [v_est_true; v_est_sel(new_locs)];
+%% Channel reconstruction
+for frame = 1:num_frames
+
+    % Initialize H reconstruction and go by diagonal
+    H_est_ext = zeros(N*M+L,N*M);
+    for i = 1:length(X_est)
+
+        % % DEBUGGING - Select current true H matrix
+        % H_sel = H_cell{frame};
+        % H_diag_true = diag(H_sel,-i+1);
+
+        % Select diagonal estimates
+        X_sel = X_est{i};
+        X_diag = X_sel(:,frame);
+        X_final = X_diag(Lp+1:(N*M+Lp));
+
+        % Take beginning and end samples depending on causal or non-causal
+        if i+Ln < 1 % Place non-causal part at beginning
+            X_end = X_diag(end+1+Ln:end+1-i);
+            X_final(1:(-Ln-i+1)) = X_end;
+        else % Place causal part at end
+            X_end = X_diag(L-i-Ln:Lp);
+            X_final(end-i+Lp:end) = X_end;
+        end
+
+        % Reconstruct this diagonal, add to stack
+        H_diag_mat = [zeros(i-1,N*M); diag(X_final); zeros(length(X_est)-i,N*M)];
+        H_est_ext = H_est_ext + H_diag_mat;
+
     end
+
+    % Make triangular part and make full H reconstruction
+    H_end = H_est_ext((end-L+1):end,:);
+    H_est = H_est_ext(1:N*M,:) + [H_end; zeros(N*M-L,N*M)];
+
 end
-v_est_sorted = sort(v_est_true);
-
-
-%%
-
-% Collect all estimated Dopplers
-v_est_all = vertcat(v_est{:});
-v_est_all = sort(v_est_all);
-
-% Group by similarity and only take unique estimates
-groups = [true; abs(diff(v_est_all)) > grouping_thresh];
-v_est_sorted = v_est_all(groups);
-chn_v_sorted = sort(chn_v).';
-
-
-% Just print the values so we can see them for now
-v_est_sorted.'
-chn_v_sorted.'
