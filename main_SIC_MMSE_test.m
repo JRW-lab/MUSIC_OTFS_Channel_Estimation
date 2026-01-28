@@ -280,8 +280,6 @@ for frame = 1:new_frames
     % Convert final RX_sym to RX_bit
     RX_bit = bit_order(RX_sym+1,:);
 
-    
-
     % Error calculation
     if receiver_name == "SIC-MMSE"
         bit_error_vec = TX_bit(~change_map_vert,:) ~= RX_bit(~change_map_vert,:);

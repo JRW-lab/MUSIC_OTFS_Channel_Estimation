@@ -51,7 +51,7 @@ for i = 1:N_iters
             end
 
             % Generate MMSE matrix for i-th element
-            w_MMSE = g' / (H_e * H_e' + N0/Es * eye(L+1));
+            w_MMSE = g' * pinv(H_e * H_e' + N0/Es * eye(L+1));
 
             % Do soft equalization for s
             s_hat(k+1,n+1,i) = w_MMSE * r_n_tilde;
