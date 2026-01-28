@@ -11,6 +11,9 @@ addpath(fullfile(pwd, 'Comm Functions/TX RX Functions'));
 init_frames = 10;
 v_res = 0.01;
 num_pilots_per_tsym = 1;
+d_bs_to_road = 10; % in meters
+                   % current method assumes travels towards BS for half the time
+                   % then away from BS for the remaining time
 
 % Set system parameters
 new_frames = 100;
@@ -191,6 +194,13 @@ t_RXfull_vec = zeros(new_frames,1);
 % Generate delays and Dopplers
 [~,chn_tau,chn_v] = channel_generation(Fc,vel);
 
+% Parameters for change of Doppler w/ vehicle speed
+t_frame = N*T;
+t_travel = t_frame*new_frames;
+d_traveled = 1000 * vel * t_travel / 3600; % in meters
+starting_loc = -d_traveled / 2;
+starting_angle = angle(starting_loc + 1j*d_bs_to_road);
+
 % Parameters for channel estimation
 block_size = M/num_pilots_per_tsym;
 pilot_rows = zeros(num_pilots_per_tsym,1);
@@ -251,21 +261,26 @@ for frame = 1:new_frames
     S = X_DD * F_N';
     s = S(:);
 
+    % Shift Doppler according to vehicle motion
+    ms_loc = starting_loc + t_frame * vel * (frame-1);
+    new_angle = angle(ms_loc + 1j*d_bs_to_road);
+    chn_v_sel = sin(new_angle) * chn_v / sin(starting_angle);
+
     % Generate channel
     t_offset = max_timing_offset * Ts;
     chn_g = channel_generation(Fc,vel);
     if shape == "rect" % rectangular ambiguity is closed form
         % Create H Matrix
-        H = gen_H(T,N,M,Lp,Ln,chn_g,chn_tau,chn_v,shape,alpha,t_offset);
+        H = gen_H(T,N,M,Lp,Ln,chn_g,chn_tau,chn_v_sel,shape,alpha,t_offset);
     else
         % Normalize tau and v to cohere with discrete ambig values
         chn_tau = round(chn_tau/res_chn_tau)*res_chn_tau;
-        chn_v = round(chn_v/res_chn_v)*res_chn_v;
+        chn_v_sel = round(chn_v_sel/res_chn_v)*res_chn_v;
 
         % Find direct tap indices and tap values
         l = (Ln:Lp).';
         tap_t_range = (l*Ts - chn_tau + t_offset) .* ones(Lp-Ln+1,length(chn_g),N*M);
-        tap_f_range = (ones(Lp-Ln+1,1) .* chn_v) .* ones(Lp-Ln+1,length(chn_g),N*M);
+        tap_f_range = (ones(Lp-Ln+1,1) .* chn_v_sel) .* ones(Lp-Ln+1,length(chn_g),N*M);
         tap_t_range = round(tap_t_range ./ res_chn_tau) + ceil(length(ambig_t_range)/2);
         tap_f_range = round(tap_f_range ./ res_chn_v) + ceil(length(ambig_f_range)/2);
         tap_t_range(tap_t_range < 1) = 1;
@@ -274,7 +289,7 @@ for frame = 1:new_frames
         tap_f_range(tap_f_range > 1001) = 1001;
 
         % Create H Matrix
-        H = gen_H_direct(T,N,M,Lp,Ln,chn_g,chn_v,ambig_vals,tap_t_range,tap_f_range,t_offset);
+        H = gen_H_direct(T,N,M,Lp,Ln,chn_g,chn_v_sel,ambig_vals,tap_t_range,tap_f_range,t_offset);
     end
 
     % Makes all non-causal taps causal (easier for SIC-MMSE algorithm)
