@@ -254,9 +254,6 @@ for frame = 1:new_frames
     end
 
     % Shuffle data into needed formats
-    % TX_bit_shuffled = Gamma_MN' * TX_bit;
-    % TX_sym_shuffled = Gamma_MN' * TX_sym;
-    % x_tilde = Gamma_MN' * x_DD;
     X_DD = reshape(x_DD,M,N);
     S = X_DD * F_N';
     s = S(:);
@@ -394,7 +391,7 @@ for frame = 1:new_frames
         A_ext = e_temp2.^(v_est_sorted.');
         X_est = cellfun(@(x) A_ext * x, s_est, 'UniformOutput', false);
 
-        % Channel reconstruction
+        % Channel reconstruction - Solve initial frames if initialization done
         if frame == init_frames
             frame2_max = init_frames;
             frame2_min = 1;
@@ -448,7 +445,7 @@ for frame = 1:new_frames
             H_end = H_est_ext((end-L+1):end,:);
             H_est = H_est_ext(1:N*M,:) + [H_end; zeros(N*M-L,N*M)];
 
-            % Iterative Detector - JRW
+            % Iterative Detector
             switch receiver_name
                 case "SIC-MMSE"
                     [x_hat,iters_vec(frame2),t_RXiter_vec(frame2),t_RXfull_vec(frame2)] = equalizer_SIC_MMSE(nu_sel,H_est,N/num_pilots_per_tsym,M,2*L+1,Es,N0,S_alphabet,N_iters);
@@ -476,11 +473,6 @@ for frame = 1:new_frames
             else
                 frm_errors(frame2) = 0;
             end
-
-            % % DEBUGGING - Select current true H matrix
-            % H_sel = H_cell{frame};
-            % H_diag_true = diag(H_sel,-i+1);
-            % norm(H_est{frame} - H_sel)
 
         end
     end
